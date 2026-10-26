@@ -264,3 +264,116 @@ chmod +x ~/audit.sh
 | 02-keys-configured | 19.10.2026, после настройки входа по ключу (задание 1 ПР5) |
 | 03-ssh-hardened | 19.10.2026, после усиления защиты SSH и включения UFW (задания 2–3 ПР5) |
 | 01-clean-install | 19.10.2026, в конце ПР5; фактически содержит настроенную систему, а не чистую установку |
+| 04-nginx-https | 26.10.2026, после перевода ресурса на HTTPS (задание 2 ПР6) |
+
+## 8. Веб-сервер
+
+| Параметр | Значение |
+|---|---|
+| Пакет | `nginx` (1.24.0, репозиторий Ubuntu) |
+| Конфигурация ресурса | `/etc/nginx/sites-available/devops-site`, ссылка в `/etc/nginx/sites-enabled/` |
+| Стандартный ресурс | отключён: удалена ссылка `/etc/nginx/sites-enabled/default` |
+| Каталог ресурса | `/var/www/devops-site`, владелец `devops:devops`, каталоги 755, файлы 644 |
+| Сертификат | `/etc/ssl/certs/devops.crt`, root, 644, самоподписанный, CN и SAN `devops.local`, 365 дней |
+| Закрытый ключ | `/etc/ssl/private/devops.key`, root, 600 |
+| Журналы | `/var/log/nginx/devops-site.access.log`, `/var/log/nginx/devops-site.error.log` |
+| Порты | 80 (перенаправление на HTTPS), 443 (ресурс) |
+
+Установка и каталог ресурса:
+
+```
+# [VM]
+sudo apt update && sudo apt install -y nginx
+sudo mkdir -p /var/www/devops-site
+sudo chown -R devops:devops /var/www/devops-site
+```
+
+Сертификат:
+
+```
+# [VM]
+sudo openssl req -x509 -nodes -days 365 -newkey rsa:2048 \
+  -keyout /etc/ssl/private/devops.key \
+  -out /etc/ssl/certs/devops.crt \
+  -subj "/CN=devops.local" \
+  -addext "subjectAltName=DNS:devops.local"
+```
+
+Файл `/etc/nginx/sites-available/devops-site`:
+
+```nginx
+server {
+    listen 80;
+    listen [::]:80;
+    server_name devops.local;
+
+    return 301 https://$host$request_uri;
+}
+
+server {
+    listen 443 ssl;
+    listen [::]:443 ssl;
+    server_name devops.local;
+
+    ssl_certificate     /etc/ssl/certs/devops.crt;
+    ssl_certificate_key /etc/ssl/private/devops.key;
+    ssl_protocols       TLSv1.2 TLSv1.3;
+
+    root /var/www/devops-site;
+    index index.html;
+
+    location / {
+        try_files $uri $uri/ =404;
+    }
+
+    error_page 404 /404.html;
+
+    access_log /var/log/nginx/devops-site.access.log;
+    error_log  /var/log/nginx/devops-site.error.log;
+}
+```
+
+Включение ресурса:
+
+```
+# [VM]
+sudo ln -s /etc/nginx/sites-available/devops-site /etc/nginx/sites-enabled/
+sudo rm /etc/nginx/sites-enabled/default
+sudo nginx -t && sudo systemctl reload nginx
+```
+
+Сертификат на хост (доверие через SSH), проверка:
+
+```
+# [Хост]
+scp devops:/etc/ssl/certs/devops.crt $env:USERPROFILE\devops.crt
+curl.exe --cacert $env:USERPROFILE\devops.crt -I https://devops.local
+```
+
+Доставка содержимого — из WSL (Ubuntu), в корне репозитория:
+
+```
+# [Хост, WSL] однократная подготовка
+mkdir -p ~/.ssh && chmod 700 ~/.ssh
+cp /mnt/c/Users/ManInSpace/.ssh/devops_vm ~/.ssh/ && chmod 600 ~/.ssh/devops_vm
+cp /mnt/c/Users/ManInSpace/devops.crt ~/
+git config core.fileMode false
+git config core.autocrlf true
+```
+
+`~/.ssh/config` в WSL (в WSL2 адрес 127.0.0.1 — сама WSL, поэтому подключение идёт через Host-only):
+
+```
+Host devops
+    HostName devops.local
+    Port 2222
+    User devops
+    IdentityFile ~/.ssh/devops_vm
+    IdentitiesOnly yes
+```
+
+```
+# [Хост, WSL]
+bash scripts/deploy.sh --dry-run
+bash scripts/deploy.sh
+```
