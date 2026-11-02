@@ -377,3 +377,82 @@ Host devops
 bash scripts/deploy.sh --dry-run
 bash scripts/deploy.sh
 ```
+
+## 9. Контейнеризация
+
+На VM проверены Docker Engine 29.9.2 и Docker Compose v5.6.1.
+Способ первоначальной установки нужно подтвердить командой `apt-cache policy docker-ce`.
+Пользователь `devops` входит в группу `docker`; эта группа фактически даёт права root.
+Проверки: `docker version`, `docker compose version`, `id devops`, `docker run --rm hello-world`.
+
+Исходные файлы находятся в `app/` репозитория, проект на сервере — `/home/devops/app`.
+На Windows WSL2 временно недоступен после отключения гипервизора ради работы VM.
+Доставка выполняется из PowerShell в корне репозитория:
+
+```powershell
+scp -r app devops:
+```
+
+Локальный каталог не должен содержать `.env`. SCP не удаляет серверные файлы,
+поэтому серверный `.env` сохраняется. При возвращении к rsync обязательно использовать
+`--exclude=.env` вместе с `--delete`.
+
+Секрет создаётся только на VM, не копируется на Windows и не добавляется в Git:
+
+```bash
+cd ~/app
+cp -n .env.example .env
+chmod 600 .env
+if grep -qx 'POSTGRES_PASSWORD=change_me' .env; then
+    sed -i "s/^POSTGRES_PASSWORD=.*/POSTGRES_PASSWORD=$(openssl rand -hex 16)/" .env
+fi
+docker compose up -d --build --wait
+```
+
+Файл `/home/devops/app/.env` имеет права 600. `.gitignore` и `.dockerignore`
+исключают `.env`; `.env.example` содержит только заглушку пароля.
+
+Приложение Flask работает через Gunicorn от пользователя `app`, слушает
+`0.0.0.0:5000` внутри контейнера. На VM опубликован только `127.0.0.1:5000`.
+PostgreSQL использует образ `postgres:16-alpine`, его порт на VM не опубликован.
+Сервисы находятся в сети `app_backend`; имя `db` разрешается встроенным DNS Docker.
+Приложение получает `DB_HOST=db` и запускается после healthcheck `pg_isready`.
+Для обоих сервисов задано `restart: unless-stopped`.
+
+Данные хранятся в именованном томе `app_db_data`, смонтированном в
+`/var/lib/postgresql/data`. `docker compose down` сохраняет том;
+`docker compose down -v` удаляет базу целиком (применялось только для учебной проверки).
+
+В HTTPS-блок `/etc/nginx/sites-available/devops-site`, внутрь `server { ... }`, добавлено:
+
+```nginx
+location /app/ {
+    proxy_pass http://127.0.0.1:5000/;
+    proxy_set_header Host              $host;
+    proxy_set_header X-Real-IP         $remote_addr;
+    proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto $scheme;
+}
+```
+
+Завершающий `/` в `proxy_pass` убирает префикс `/app/`. Статический `location /`
+сохранён. Перед применением: `sudo nginx -t && sudo systemctl reload nginx`.
+При размещении `location` за закрывающей скобкой `server` проверка выдаёт
+`location directive is not allowed here`; исправление — переместить блок внутрь HTTPS server.
+
+Проверки из PowerShell:
+
+```powershell
+curl.exe --cacert "$env:USERPROFILE\devops.crt" https://devops.local/app/
+curl.exe --cacert "$env:USERPROFILE\devops.crt" https://devops.local/app/health
+curl.exe --cacert "$env:USERPROFILE\devops.crt" -I https://devops.local/
+```
+
+При остановке `docker compose stop app` Nginx возвращает 502, а в
+`/var/log/nginx/devops-site.error.log` появляется `connect() failed (111: Connection refused)`
+для upstream `127.0.0.1:5000`. Восстановление: `docker compose start app`.
+
+Раздел [5] `scripts/audit.sh` проверяет Docker, healthy PostgreSQL, отсутствие
+публикации 5000/5432 за пределами 127.0.0.1 и права `.env`. Идентификатор контейнера
+БД определяется через Compose по имени сервиса, без зависимости от имени контейнера.
+Запуск на VM: `bash ~/devops-course-2026/scripts/audit.sh; echo $?`.
