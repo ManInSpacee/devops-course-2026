@@ -38,5 +38,23 @@ check "Сертификат действует ещё не менее $CERT_DAYS
 check "Нет файлов ресурса, доступных для записи всем" "" "$(find /var/www/devops-site -perm -o+w)"
 check "Права закрытого ключа равны 600" "600" "$(sudo stat -c '%a' /etc/ssl/private/devops.key)"
 
+echo "[5] Контейнеризация"
+check "Служба docker активна" "active" "$(systemctl is-active docker)"
+db_id="$(docker compose --project-directory "$HOME/app" ps -q db)"
+db_health="unknown"
+if [[ -n "$db_id" ]]; then
+    db_health="$(docker inspect -f '{{.State.Health.Status}}' "$db_id")"
+fi
+check "Контейнер PostgreSQL healthy" "healthy" "$db_health"
+ports_safe="no"
+if listeners="$(ss -H -tln)"; then
+    ports_safe="$(printf '%s\n' "$listeners" | awk '
+        $4 ~ /:(5000|5432)$/ && $4 !~ /^127\.0\.0\.1:/ { unsafe=1 }
+        END { print unsafe ? "no" : "yes" }
+    ')"
+fi
+check "Порты 5000 и 5432 не открыты за пределами 127.0.0.1" "yes" "$ports_safe"
+check "Права ~/app/.env равны 600" "600" "$(stat -c '%a' "$HOME/app/.env")"
+
 echo "Пройдено: $PASS, не пройдено: $FAIL"
 [[ $FAIL -eq 0 ]] && exit 0 || exit 1
